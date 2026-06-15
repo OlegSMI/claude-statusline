@@ -2,8 +2,13 @@
 
 Configure your Claude Code statusline to show limits, directory and git info
 
-![demo](./.github/demo.png)
+## Demo
 
+```text
+╭─ Claude Statusline ───────────────────────────────────────────────╮
+│ Opus 4.8  │ ctx:0% │ 5h:[█░░░░░░░] 14% 2h4m │ 7d:[░░░░░░░░] 3% 4d19h │
+╰───────────────────────────────────────────────────────────────────╯
+```
 ## Install
 
 Run the command below to set it up
