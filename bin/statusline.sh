@@ -8,19 +8,15 @@ if [ -z "$input" ]; then
     exit 0
 fi
 
-# ── Colors ──────────────────────────────────────────────
-blue='\033[38;2;0;153;255m'
-orange='\033[38;2;255;176;85m'
-green='\033[38;2;0;175;80m'
-cyan='\033[38;2;86;182;194m'
-red='\033[38;2;255;85;85m'
-yellow='\033[38;2;230;200;0m'
+# ── Colors (tuned for dark theme) ───────────────────────
+green='\033[38;2;120;200;120m'
+gray='\033[38;2;150;150;150m'
 white='\033[38;2;220;220;220m'
-magenta='\033[38;2;180;140;255m'
+red='\033[38;2;255;95;95m'
+yellow='\033[38;2;235;205;70m'
+orange='\033[38;2;255;176;85m'
 dim='\033[2m'
 reset='\033[0m'
-
-sep=" ${dim}│${reset} "
 
 # ── Helpers ─────────────────────────────────────────────
 color_for_pct() {
@@ -32,6 +28,7 @@ color_for_pct() {
     fi
 }
 
+# Bracketed bar: [████░░░░]
 build_bar() {
     local pct=$1
     local width=$2
@@ -40,74 +37,62 @@ build_bar() {
 
     local filled=$(( pct * width / 100 ))
     local empty=$(( width - filled ))
-    local bar_color
-    bar_color=$(color_for_pct "$pct")
 
     local filled_str="" empty_str=""
-    for ((i=0; i<filled; i++)); do filled_str+="●"; done
-    for ((i=0; i<empty; i++)); do empty_str+="○"; done
+    for ((i=0; i<filled; i++)); do filled_str+="█"; done
+    for ((i=0; i<empty; i++)); do empty_str+="░"; done
 
-    printf "${bar_color}${filled_str}${dim}${empty_str}${reset}"
+    printf "${dim}[${reset}${gray}${filled_str}${dim}${empty_str}${reset}${dim}]${reset}"
 }
 
-format_epoch_time() {
-    local epoch=$1
-    local style=$2
-    [ -z "$epoch" ] || [ "$epoch" = "null" ] || [ "$epoch" = "0" ] && return
+# Time remaining until an epoch, formatted like "<1m", "6d22h", "3h40m"
+time_until() {
+    local target=$1
+    [ -z "$target" ] || [ "$target" = "null" ] || [ "$target" = "0" ] && return
 
-    local result=""
-    case "$style" in
-        time)
-            result=$(date -j -r "$epoch" +"%l:%M%p" 2>/dev/null)
-            [ -z "$result" ] && result=$(date -d "@$epoch" +"%l:%M%P" 2>/dev/null)
-            result=$(echo "$result" | sed 's/^ //; s/\.//g' | tr '[:upper:]' '[:lower:]')
-            ;;
-        datetime)
-            result=$(date -j -r "$epoch" +"%b %-d, %l:%M%p" 2>/dev/null)
-            [ -z "$result" ] && result=$(date -d "@$epoch" +"%b %-d, %l:%M%P" 2>/dev/null)
-            result=$(echo "$result" | sed 's/  / /g; s/^ //; s/\.//g' | tr '[:upper:]' '[:lower:]')
-            ;;
-        *)
-            result=$(date -j -r "$epoch" +"%b %-d" 2>/dev/null)
-            [ -z "$result" ] && result=$(date -d "@$epoch" +"%b %-d" 2>/dev/null)
-            result=$(echo "$result" | tr '[:upper:]' '[:lower:]')
-            ;;
-    esac
-    printf "%s" "$result"
+    local now diff
+    now=$(date +%s)
+    diff=$(( target - now ))
+    [ "$diff" -lt 0 ] && diff=0
+
+    local days=$(( diff / 86400 ))
+    local hours=$(( (diff % 86400) / 3600 ))
+    local mins=$(( (diff % 3600) / 60 ))
+
+    if [ "$days" -gt 0 ]; then
+        printf "%dd%dh" "$days" "$hours"
+    elif [ "$hours" -gt 0 ]; then
+        printf "%dh%dm" "$hours" "$mins"
+    elif [ "$mins" -gt 0 ]; then
+        printf "%dm" "$mins"
+    else
+        printf "<1m"
+    fi
 }
 
 iso_to_epoch() {
     local iso_str="$1"
-
     local epoch
     epoch=$(date -d "${iso_str}" +%s 2>/dev/null)
-    if [ -n "$epoch" ]; then
-        echo "$epoch"
-        return 0
-    fi
+    if [ -n "$epoch" ]; then echo "$epoch"; return 0; fi
 
     local stripped="${iso_str%%.*}"
     stripped="${stripped%%Z}"
     stripped="${stripped%%+*}"
     stripped="${stripped%%-[0-9][0-9]:[0-9][0-9]}"
 
-    if [[ "$iso_str" == *"Z"* ]] || [[ "$iso_str" == *"+00:00"* ]] || [[ "$iso_str" == *"-00:00"* ]]; then
+    if [[ "$iso_str" == *"Z"* ]] || [[ "$iso_str" == *"+00:00"* ]]; then
         epoch=$(env TZ=UTC date -j -f "%Y-%m-%dT%H:%M:%S" "$stripped" +%s 2>/dev/null)
         [ -z "$epoch" ] && epoch=$(env TZ=UTC date -d "${stripped/T/ }" +%s 2>/dev/null)
     else
         epoch=$(date -j -f "%Y-%m-%dT%H:%M:%S" "$stripped" +%s 2>/dev/null)
         [ -z "$epoch" ] && epoch=$(date -d "${stripped/T/ }" +%s 2>/dev/null)
     fi
-
-    if [ -n "$epoch" ]; then
-        echo "$epoch"
-        return 0
-    fi
-
+    [ -n "$epoch" ] && echo "$epoch" && return 0
     return 1
 }
 
-# ── Extract JSON data ───────────────────────────────────
+# ── Model + context % ───────────────────────────────────
 model_name=$(echo "$input" | jq -r '.model.display_name // "Claude"')
 
 size=$(echo "$input" | jq -r '.context_window.context_window_size // 200000')
@@ -119,107 +104,38 @@ cache_read=$(echo "$input" | jq -r '.context_window.current_usage.cache_read_inp
 current=$(( input_tokens + cache_create + cache_read ))
 
 if [ "$size" -gt 0 ]; then
-    pct_used=$(( current * 100 / size ))
+    ctx_pct=$(( current * 100 / size ))
 else
-    pct_used=0
+    ctx_pct=0
 fi
-
-effort="default"
-settings_path="$HOME/.claude/settings.json"
-if [ -f "$settings_path" ]; then
-    effort=$(jq -r '.effortLevel // "default"' "$settings_path" 2>/dev/null)
-fi
-
-# ── LINE 1: Model │ Context % │ Directory (branch) │ Session │ Effort ──
-pct_color=$(color_for_pct "$pct_used")
-cwd=$(echo "$input" | jq -r '.cwd // ""')
-[ -z "$cwd" ] || [ "$cwd" = "null" ] && cwd=$(pwd)
-dirname=$(basename "$cwd")
-
-git_branch=""
-git_dirty=""
-if git -C "$cwd" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
-    git_branch=$(git -C "$cwd" symbolic-ref --short HEAD 2>/dev/null)
-    if [ -n "$(git -C "$cwd" --no-optional-locks status --porcelain 2>/dev/null)" ]; then
-        git_dirty="*"
-    fi
-fi
-
-session_duration=""
-session_start=$(echo "$input" | jq -r '.session.start_time // empty')
-if [ -n "$session_start" ] && [ "$session_start" != "null" ]; then
-    start_epoch=$(iso_to_epoch "$session_start")
-    if [ -n "$start_epoch" ]; then
-        now_epoch=$(date +%s)
-        elapsed=$(( now_epoch - start_epoch ))
-        if [ "$elapsed" -ge 3600 ]; then
-            session_duration="$(( elapsed / 3600 ))h$(( (elapsed % 3600) / 60 ))m"
-        elif [ "$elapsed" -ge 60 ]; then
-            session_duration="$(( elapsed / 60 ))m"
-        else
-            session_duration="${elapsed}s"
-        fi
-    fi
-fi
-
-skip_perms=""
-parent_cmd=$(ps -o args= -p "$PPID" 2>/dev/null)
-if [[ "$parent_cmd" == *"--dangerously-skip-permissions"* ]]; then
-    skip_perms="⚡  "
-fi
-
-line1="${blue}${model_name}${reset}"
-line1+="${sep}"
-line1+="✍️ ${pct_color}${pct_used}%${reset}"
-line1+="${sep}"
-line1+="${skip_perms}${cyan}${dirname}${reset}"
-if [ -n "$git_branch" ]; then
-    line1+=" ${green}(${git_branch}${red}${git_dirty}${green})${reset}"
-fi
-if [ -n "$session_duration" ]; then
-    line1+="${sep}"
-    line1+="${dim}⏱ ${reset}${white}${session_duration}${reset}"
-fi
-line1+="${sep}"
-case "$effort" in
-    high)   line1+="${magenta}● ${effort}${reset}" ;;
-    medium) line1+="${dim}◑ ${effort}${reset}" ;;
-    low)    line1+="${dim}◔ ${effort}${reset}" ;;
-    *)      line1+="${dim}◑ ${effort}${reset}" ;;
-esac
+ctx_color=$(color_for_pct "$ctx_pct")
 
 # ── Rate limits from stdin (primary) ───────────────────
 has_stdin_rates=false
-five_hour_pct=""
-five_hour_reset_epoch=""
-seven_day_pct=""
-seven_day_reset_epoch=""
+five_pct=""; five_reset=""
+seven_pct=""; seven_reset=""
 
-stdin_five_pct=$(echo "$input" | jq -r '.rate_limits.five_hour.used_percentage // empty')
-if [ -n "$stdin_five_pct" ]; then
+stdin_five=$(echo "$input" | jq -r '.rate_limits.five_hour.used_percentage // empty')
+if [ -n "$stdin_five" ]; then
     has_stdin_rates=true
-    five_hour_pct=$(printf "%.0f" "$stdin_five_pct")
-    five_hour_reset_epoch=$(echo "$input" | jq -r '.rate_limits.five_hour.resets_at // empty')
-    seven_day_pct=$(echo "$input" | jq -r '.rate_limits.seven_day.used_percentage // empty' | awk '{printf "%.0f", $1}')
-    seven_day_reset_epoch=$(echo "$input" | jq -r '.rate_limits.seven_day.resets_at // empty')
+    five_pct=$(printf "%.0f" "$stdin_five")
+    five_reset=$(echo "$input" | jq -r '.rate_limits.five_hour.resets_at // empty')
+    seven_pct=$(echo "$input" | jq -r '.rate_limits.seven_day.used_percentage // empty' | awk '{printf "%.0f", $1}')
+    seven_reset=$(echo "$input" | jq -r '.rate_limits.seven_day.resets_at // empty')
 fi
 
 # ── Fallback: API call (cached) ────────────────────────
 cache_file="/tmp/claude/statusline-usage-cache.json"
 cache_max_age=60
 mkdir -p /tmp/claude
-
 usage_data=""
-extra_enabled="false"
 
 if ! $has_stdin_rates; then
     needs_refresh=true
-
     if [ -f "$cache_file" ]; then
         cache_mtime=$(stat -c %Y "$cache_file" 2>/dev/null || stat -f %m "$cache_file" 2>/dev/null)
         now=$(date +%s)
-        cache_age=$(( now - cache_mtime ))
-        if [ "$cache_age" -lt "$cache_max_age" ]; then
+        if [ "$(( now - cache_mtime ))" -lt "$cache_max_age" ]; then
             needs_refresh=false
             usage_data=$(cat "$cache_file" 2>/dev/null)
         fi
@@ -231,23 +147,11 @@ if ! $has_stdin_rates; then
             token="$CLAUDE_CODE_OAUTH_TOKEN"
         elif command -v security >/dev/null 2>&1; then
             blob=$(security find-generic-password -s "Claude Code-credentials" -w 2>/dev/null)
-            if [ -n "$blob" ]; then
-                token=$(echo "$blob" | jq -r '.claudeAiOauth.accessToken // empty' 2>/dev/null)
-            fi
+            [ -n "$blob" ] && token=$(echo "$blob" | jq -r '.claudeAiOauth.accessToken // empty' 2>/dev/null)
         fi
         if [ -z "$token" ] || [ "$token" = "null" ]; then
             creds_file="${HOME}/.claude/.credentials.json"
-            if [ -f "$creds_file" ]; then
-                token=$(jq -r '.claudeAiOauth.accessToken // empty' "$creds_file" 2>/dev/null)
-            fi
-        fi
-        if [ -z "$token" ] || [ "$token" = "null" ]; then
-            if command -v secret-tool >/dev/null 2>&1; then
-                blob=$(timeout 2 secret-tool lookup service "Claude Code-credentials" 2>/dev/null)
-                if [ -n "$blob" ]; then
-                    token=$(echo "$blob" | jq -r '.claudeAiOauth.accessToken // empty' 2>/dev/null)
-                fi
-            fi
+            [ -f "$creds_file" ] && token=$(jq -r '.claudeAiOauth.accessToken // empty' "$creds_file" 2>/dev/null)
         fi
 
         if [ -n "$token" ] && [ "$token" != "null" ]; then
@@ -263,73 +167,51 @@ if ! $has_stdin_rates; then
                 echo "$response" > "$cache_file"
             fi
         fi
-        if [ -z "$usage_data" ] && [ -f "$cache_file" ]; then
-            usage_data=$(cat "$cache_file" 2>/dev/null)
-        fi
+        [ -z "$usage_data" ] && [ -f "$cache_file" ] && usage_data=$(cat "$cache_file" 2>/dev/null)
     fi
 
     if [ -n "$usage_data" ] && echo "$usage_data" | jq -e . >/dev/null 2>&1; then
-        five_hour_pct=$(echo "$usage_data" | jq -r '.five_hour.utilization // 0' | awk '{printf "%.0f", $1}')
-        five_hour_reset_iso=$(echo "$usage_data" | jq -r '.five_hour.resets_at // empty')
-        five_hour_reset_epoch=$(iso_to_epoch "$five_hour_reset_iso")
-        seven_day_pct=$(echo "$usage_data" | jq -r '.seven_day.utilization // 0' | awk '{printf "%.0f", $1}')
-        seven_day_reset_iso=$(echo "$usage_data" | jq -r '.seven_day.resets_at // empty')
-        seven_day_reset_epoch=$(iso_to_epoch "$seven_day_reset_iso")
-
-        extra_enabled=$(echo "$usage_data" | jq -r '.extra_usage.is_enabled // false')
-    fi
-else
-    if [ -f "$cache_file" ]; then
-        usage_data=$(cat "$cache_file" 2>/dev/null)
-        if [ -n "$usage_data" ] && echo "$usage_data" | jq -e . >/dev/null 2>&1; then
-            extra_enabled=$(echo "$usage_data" | jq -r '.extra_usage.is_enabled // false')
-        fi
+        five_pct=$(echo "$usage_data" | jq -r '.five_hour.utilization // 0' | awk '{printf "%.0f", $1}')
+        five_reset_iso=$(echo "$usage_data" | jq -r '.five_hour.resets_at // empty')
+        five_reset=$(iso_to_epoch "$five_reset_iso")
+        seven_pct=$(echo "$usage_data" | jq -r '.seven_day.utilization // 0' | awk '{printf "%.0f", $1}')
+        seven_reset_iso=$(echo "$usage_data" | jq -r '.seven_day.resets_at // empty')
+        seven_reset=$(iso_to_epoch "$seven_reset_iso")
     fi
 fi
 
-# ── Rate limit lines ────────────────────────────────────
-rate_lines=""
-bar_width=10
+# Normalize resets to epoch (stdin gives ISO, fallback already epoch)
+norm_epoch() {
+    local v="$1"
+    [ -z "$v" ] && return
+    case "$v" in
+        *[!0-9]*) iso_to_epoch "$v" ;;   # contains non-digit → ISO
+        *) echo "$v" ;;                   # already epoch
+    esac
+}
+five_reset_epoch=$(norm_epoch "$five_reset")
+seven_reset_epoch=$(norm_epoch "$seven_reset")
 
-if [ -n "$five_hour_pct" ]; then
-    five_hour_reset=$(format_epoch_time "$five_hour_reset_epoch" "time")
-    five_hour_bar=$(build_bar "$five_hour_pct" "$bar_width")
-    five_hour_pct_color=$(color_for_pct "$five_hour_pct")
-    five_hour_pct_fmt=$(printf "%3d" "$five_hour_pct")
+# ── Build single-line output ────────────────────────────
+bar_width=8
+line="${green}${model_name}${reset}"
+line+="  ${gray}ctx:${reset}${ctx_color}${ctx_pct}%${reset}"
 
-    rate_lines+="${white}current${reset} ${five_hour_bar} ${five_hour_pct_color}${five_hour_pct_fmt}%${reset}"
-    [ -n "$five_hour_reset" ] && rate_lines+=" ${dim}⟳${reset} ${white}${five_hour_reset}${reset}"
+if [ -n "$five_pct" ]; then
+    bar=$(build_bar "$five_pct" "$bar_width")
+    pc=$(color_for_pct "$five_pct")
+    line+="  ${gray}5h:${reset}${bar} ${pc}${five_pct}%${reset}"
+    rem=$(time_until "$five_reset_epoch")
+    [ -n "$rem" ] && line+=" ${dim}${rem}${reset}"
 fi
 
-if [ -n "$seven_day_pct" ]; then
-    seven_day_reset=$(format_epoch_time "$seven_day_reset_epoch" "datetime")
-    seven_day_bar=$(build_bar "$seven_day_pct" "$bar_width")
-    seven_day_pct_color=$(color_for_pct "$seven_day_pct")
-    seven_day_pct_fmt=$(printf "%3d" "$seven_day_pct")
-
-    [ -n "$rate_lines" ] && rate_lines+="\n"
-    rate_lines+="${white}weekly${reset}  ${seven_day_bar} ${seven_day_pct_color}${seven_day_pct_fmt}%${reset}"
-    [ -n "$seven_day_reset" ] && rate_lines+=" ${dim}⟳${reset} ${white}${seven_day_reset}${reset}"
+if [ -n "$seven_pct" ]; then
+    bar=$(build_bar "$seven_pct" "$bar_width")
+    pc=$(color_for_pct "$seven_pct")
+    line+="  ${gray}7d:${reset}${bar} ${pc}${seven_pct}%${reset}"
+    rem=$(time_until "$seven_reset_epoch")
+    [ -n "$rem" ] && line+=" ${dim}${rem}${reset}"
 fi
 
-if [ "$extra_enabled" = "true" ] && [ -n "$usage_data" ]; then
-    extra_pct=$(echo "$usage_data" | jq -r '.extra_usage.utilization // 0' | awk '{printf "%.0f", $1}')
-    extra_used=$(echo "$usage_data" | jq -r '.extra_usage.used_credits // 0' | awk '{printf "%.2f", $1/100}')
-    extra_limit=$(echo "$usage_data" | jq -r '.extra_usage.monthly_limit // 0' | awk '{printf "%.2f", $1/100}')
-    extra_bar=$(build_bar "$extra_pct" "$bar_width")
-    extra_pct_color=$(color_for_pct "$extra_pct")
-
-    extra_reset=$(date -v+1m -v1d +"%b %-d" 2>/dev/null | tr '[:upper:]' '[:lower:]')
-    if [ -z "$extra_reset" ]; then
-        extra_reset=$(date -d "$(date +%Y-%m-01) +1 month" +"%b %-d" 2>/dev/null | tr '[:upper:]' '[:lower:]')
-    fi
-
-    [ -n "$rate_lines" ] && rate_lines+="\n"
-    rate_lines+="${white}extra${reset}   ${extra_bar} ${extra_pct_color}\$${extra_used}${dim}/${reset}${white}\$${extra_limit}${reset} ${dim}⟳${reset} ${white}${extra_reset}${reset}"
-fi
-
-# ── Output ──────────────────────────────────────────────
-printf "%b" "$line1"
-[ -n "$rate_lines" ] && printf "\n\n%b" "$rate_lines"
-
+printf "%b" "$line"
 exit 0
